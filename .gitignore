@@ -1,0 +1,7 @@
+out/
+.idea/
+*.aux
+*.log
+!logs/*.log
+*.out
+*.toc
