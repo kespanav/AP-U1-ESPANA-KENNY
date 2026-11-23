@@ -1,0 +1,88 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage[margin=2cm]{geometry}
+\usepackage{graphicx}
+\usepackage{url}
+
+% Inserta la captura si existe; si no, deja un recuadro (asi siempre compila)
+\newcommand{\captura}[1]{\IfFileExists{img/#1}{\includegraphics[width=0.9\linewidth]{img/#1}}{\fbox{Falta img/#1}}}
+
+\title{AP-U1 $\cdot$ AforoSeguro: control de aforo distribuido}
+\author{Apellido Nombre \\ Aplicaciones Distribuidas (ISR-701) -- UTEQ}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Resumen del prototipo}
+Java 21 con sockets TCP. Un coordinador (id 0) guarda el contador global; tres puertas
+(P1, P2, P3) le piden permiso para \texttt{ENTRAR}, avisan \texttt{SALIR}, consultan
+\texttt{ESTADO} y envían un \texttt{LATIDO} cada 2\,s. Cada mensaje es una línea
+(\texttt{TIPO|token|puerta|lamport}) y lleva el reloj de Lamport del emisor.
+
+\section{Escenarios}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|p{0.6cm}|p{2.4cm}|p{12cm}|}
+\hline
+\textbf{E} & \textbf{Captura} & \textbf{Interpretación de lo observado} \\ \hline
+E0 & Figura \ref{fig:e0} & Todos los adaptadores aparecen desconectados; primer commit con el código de sesión 1. \\ \hline
+E1 & Figura \ref{fig:e1} & Entraron personas por P1, P2 y P3 y salió una por P2. \texttt{estado} muestra el mismo total en las tres puertas porque el único contador está en el coordinador. \\ \hline
+E2 & Figura \ref{fig:e2} & Con 10 dentro, la undécima \texttt{ENTRAR} fue \texttt{RECHAZADA (AFORO\_COMPLETO)}. Con la orden \texttt{falso} se envió un token incorrecto: respuesta \texttt{TOKEN\_INVALIDO} y línea \texttt{TOKEN\_INVALIDO} en \texttt{coordinador.log}. \\ \hline
+E3 & Figura \ref{fig:e3} & Inseguro: 30 permitidas de 30, pero el coordinador registró solo 25 dentro (se supera el aforo y además se pierden actualizaciones). Normal: ver sección 3. \\ \hline
+E4 & Figura \ref{fig:e4} & Se detuvo P3; a los $\approx$6\,s el coordinador registró \texttt{4395;0;PUERTA\_CAIDA;P3 sin latidos por 6045 ms}. Al reiniciarla registró \texttt{4474;0;PUERTA\_ACTIVA;P3}. \\ \hline
+E5 & Figura \ref{fig:e5} & Se detuvo el coordinador y se intentó \texttt{entrar} desde P1: la puerta muestra ``Coordinador NO disponible'' y \textbf{no deja pasar}, para no arriesgar superar el aforo. \\ \hline
+E6 & Figura \ref{fig:e6} & \texttt{OrdenTotal} generó \texttt{orden\_total.log} ordenado por Lamport y, en empate, por id. Ver sección 4. \\ \hline
+\end{tabular}
+\caption{Escenarios ejecutados}
+\end{table}
+
+\begin{figure}[h]\centering\captura{e0.png}\caption{E0: red desconectada}\label{fig:e0}\end{figure}
+\begin{figure}[h]\centering\captura{e1.png}\caption{E1: operación normal}\label{fig:e1}\end{figure}
+\begin{figure}[h]\centering\captura{e2.png}\caption{E2: aforo completo y token inválido}\label{fig:e2}\end{figure}
+\begin{figure}[h]\centering\captura{e3.png}\caption{E3: PruebaCarga normal e inseguro}\label{fig:e3}\end{figure}
+\begin{figure}[h]\centering\captura{e4.png}\caption{E4: P3 caída y reactivada}\label{fig:e4}\end{figure}
+\begin{figure}[h]\centering\captura{e5.png}\caption{E5: coordinador caído}\label{fig:e5}\end{figure}
+\begin{figure}[h]\centering\captura{e6.png}\caption{E6: orden total}\label{fig:e6}\end{figure}
+
+\clearpage
+\section{Cifras de E3}
+\begin{center}
+\begin{tabular}{|l|c|c|c|}
+\hline
+\textbf{Modo} & \textbf{Permitidas} & \textbf{Rechazadas} & \textbf{Dentro (coordinador)} \\ \hline
+Normal    & PENDIENTE & PENDIENTE & PENDIENTE \\ \hline
+Inseguro  & 30 & 0  & 25 \\ \hline
+\end{tabular}
+\end{center}
+En modo inseguro las 30 solicitudes fueron permitidas (aforo 10 superado) y, además, el
+coordinador quedó con 25 y no con 30: varios hilos hicieron \texttt{dentro = dentro + 1} a la vez
+y algunas sumas se perdieron (actualización perdida).
+
+\section{Pares causales en \texttt{orden\_total.log} (E6)}
+\begin{enumerate}
+\item \texttt{318;1;ENVIA\_ENTRAR} (P1 envía) $\rightarrow$ \texttt{319;0;RECIBE\_ENTRAR;puerta=1} (coordinador recibe). $318 < 319$: el envío aparece antes que su recepción.
+\item \texttt{354;2;ENVIA\_ENTRAR} (P2 envía) $\rightarrow$ \texttt{355;0;RECIBE\_ENTRAR;puerta=2} (coordinador recibe), y luego \texttt{356;0;ENVIA\_RESPUESTA} $\rightarrow$ \texttt{357;2;RECIBE\_RESPUESTA}. El orden total respeta la causalidad en ambos sentidos.
+\end{enumerate}
+Se cumple porque al recibir se hace $\max(\mathit{local}, \mathit{recibido})+1$, así la recepción siempre tiene un número mayor que el envío.
+
+\section{Preguntas de análisis}
+\textbf{1. E3.} En modo \texttt{-inseguro} cada hilo lee \texttt{dentro} (por ejemplo 0), espera 50\,ms y recién suma. Los 30 hilos leyeron un valor menor a 10 antes de que alguno actualizara: es una \emph{condición de carrera}, por eso se permitieron 30 (y el contador quedó en 25 porque algunas sumas se pisaron). En modo normal, la consulta y la suma están en un mismo bloque \texttt{synchronized} (\emph{exclusión mutua}): solo un hilo a la vez, y salen exactamente 10. Costo: las solicitudes se atienden en fila, se pierde paralelismo.
+
+\textbf{2. E5.} Mi sistema priorizó la \emph{consistencia}: sin coordinador la puerta no deja entrar. Según CAP, ante una partición elegí C sobre A (sistema CP). Para el público: esperan o no entran mientras el coordinador está caído. Para la administración: el aforo nunca se supera, pero necesita un plan manual mientras se recupera.
+
+\textbf{3. Punto único de fallo.} Usaría \emph{replicación} del coordinador junto con un \emph{algoritmo de elección} (abusón o anillo) para que una réplica tome el mando si el líder cae. Problema nuevo: mantener las réplicas del contador iguales; si se desincronizan (o hay dos líderes por una partición) cada una podría dejar entrar gente y superar el aforo.
+
+\textbf{4. Falacias.} Tuve en cuenta ``la latencia es cero'' y ``la red es confiable'': el timeout de 6\,s equivale a 3 latidos perdidos, así un latido lento no marca la puerta como caída. Con 7\,s de latencia los latidos llegarían después del timeout: el coordinador marcaría puertas vivas como \texttt{CAIDA}, y las puertas (que esperan 3\,s la respuesta) creerían caído al coordinador y rechazarían todas las entradas.
+
+\section{Limitaciones}
+\begin{itemize}
+\item El contador está solo en memoria: si el coordinador se reinicia, \texttt{dentro} vuelve a 0 aunque haya gente adentro.
+\item Al reiniciar un proceso su reloj de Lamport vuelve a 1 (se ve en \texttt{P3.log} y en \texttt{coordinador.log}, que tiene varias líneas \texttt{1;0;INICIO}).
+\item En modo inseguro el contador no solo supera el aforo: también queda mal (25 en vez de 30).
+\item El modo inseguro solo afecta a \texttt{ENTRAR}; \texttt{SALIR} siempre usa el candado.
+\end{itemize}
+
+\end{document}
